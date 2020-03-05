@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:amq="http://activemq.apache.org/schema/core"
+	xmlns:cxf="http://camel.apache.org/schema/cxf"
+	xsi:schemaLocation="
+       http://www.springframework.org/schema/beans
+       http://www.springframework.org/schema/beans/spring-beans.xsd
+       http://camel.apache.org/schema/spring
+       http://camel.apache.org/schema/spring/camel-spring.xsd
+       http://activemq.apache.org/schema/core
+       http://activemq.apache.org/schema/core/activemq-core.xsd
+       http://camel.apache.org/schema/cxf
+       http://camel.apache.org/schema/cxf/camel-cxf-2.8.3.xsd">
+
+	<bean id="amq" class="org.apache.activemq.camel.component.ActiveMQComponent">
+		<property name="brokerURL" value="failover:tcp://localhost:61616" />
+	</bean>
+	
+	<bean class="org.springframework.jdbc.datasource.DriverManagerDataSource" id="dataSource">
+        <property name="driverClassName" value="org.postgresql.Driver"/>
+        <property name="url" value="jdbc:postgresql://localhost:5433/comprobantes-electronicos"/>
+        <property name="username" value="postgres"/>
+        <property name="password" value="root"/>
+    </bean>
+    
+    <bean class="org.apache.camel.component.sql.SqlComponent" id="sql">
+        <property name="dataSource" ref="dataSource"/>
+    </bean>
+    
+    <bean class="com.sc.soa.fe.read.file.bg.ProcesarArchivo" id="procesarArchivoBean"/>
+    <bean class="com.sc.soa.fe.read.file.bg.InsertarArchivoComprobanteBean" id="insertarArchivoComprobanteBean"/>
+    <bean class="com.sc.soa.fe.read.file.bg.exception.ExceptionLeerArchivoHostService" id="exceptionLeerArchivoHostService"/>
+
+	<camelContext id="readFileBgcamelContextId" xmlns="http://camel.apache.org/schema/spring">
+        <propertyPlaceholder id="leerArchivHostPropertiesId" location="classpath:read-file-bg.properties"/>
+        <route id="leerArchivo">
+            <from id="readFileFrom" uri="file:{{sftp.dir.temp}}"/>
+            <doTry id="readFileDoTry">
+                <to id="directReadFileTo" uri="direct:insertFile"/>
+                <doCatch id="exReadFileDoCatch">
+                    <exception>java.lang.Exception</exception>
+                    <bean id="exReadFileBean" method="procesarException" ref="exceptionLeerArchivoHostService"/>
+                    <to id="exReadFileAmqTo" uri="amq:{{kr.control.ex.queue}}"/>
+                </doCatch>
+            </doTry>
+        </route>
+        <route id="insertFile">
+            <from id="insertFileDirect" uri="direct:insertFile"/>
+            <doTry id="insertFileDoTry">
+                <bean id="processFileBean" method="procesarArchivoCabecera" ref="insertarArchivoComprobanteBean"/>
+                <setHeader headerName="originalBody" id="bodyOriginalHeader">
+                    <simple>${body}</simple>
+                </setHeader>
+                <bean id="convertirCabeceraBean" method="convertirCabecera" ref="insertarArchivoComprobanteBean"/>
+                <bean id="crearFileBean" method="crearArchivoComprobante" ref="insertarArchivoComprobanteBean"/>
+                <log id="insertFileTableLog" message="Insertar registro en la tabla: FeArchivoComprobanteTbl"/>
+                <to id="sqlInsertFileTo" uri="sql:{{sql.sp.insert.archivo.comprobante}}"/>
+                <bean id="getIdFileBean" method="obtenerIdArchivo" ref="insertarArchivoComprobanteBean"/>
+                <setBody id="setBodyOriginal">
+                    <simple>${headers.originalBody}</simple>
+                </setBody>
+                <setHeader headerName="originalBody" id="setHeaderNullOriginalBody">
+                    <simple>null</simple>
+                </setHeader>
+                <to uri="direct:procesarArchivo"/>
+                <doCatch id="exInsertFile">
+                    <exception>java.lang.Exception</exception>
+                    <bean id="exInsertFileBan" method="procesarException" ref="exceptionLeerArchivoHostService"/>
+                    <to id="exInsertFileAmqTo" uri="amq:{{kr.control.ex.queue}}"/>
+                </doCatch>
+            </doTry>
+        </route>
+        <route id="procesarArchivoRoute">
+            <from uri="direct:procesarArchivo"/>
+            <doTry>
+                <split streaming="true">
+                    <tokenize token="{{token.split}}"/>
+                    <bean method="procesarArchivo" ref="procesarArchivoBean"/>
+                    <convertBodyTo id="_convertBodyTo1" type="java.lang.String"/>
+                    <choice>
+                        <when>
+                            <simple>${body} != null</simple>
+                            <to uri="amq:{{kr.msg.bg.queue}}"/>
+                            <choice>
+                                <when>
+                                    <simple>${header.CamelSplitComplete}</simple>
+                                    <setHeader headerName="ComprobantesCargados">
+                                        <simple>${headers.CamelSplitSize}</simple>
+                                    </setHeader>
+                                    <setHeader headerName="fechaFinCarga">
+                                        <simple>${date:now:yyyy-MM-dd HH:mm:ss:SSS}</simple>
+                                    </setHeader>
+                                    <to uri="amq:{{kr.fin.carga.archivo.queue}}"/>
+                                </when>
+                            </choice>
+                        </when>
+                    </choice>
+                </split>
+                <doCatch>
+                    <exception>java.lang.Exception</exception>
+                    <bean method="procesarException" ref="exceptionLeerArchivoHostService"/>
+                    <to uri="amq:{{kr.control.ex.queue}}"/>
+                </doCatch>
+            </doTry>
+        </route>
+    </camelContext>
+</beans>
