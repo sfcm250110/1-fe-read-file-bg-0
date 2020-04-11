@@ -99,7 +99,7 @@
 		<dependency>
 			<groupId>ec.com.kruger</groupId>
 			<artifactId>fe-split-file-bg</artifactId>
-			<version>3.0.0</version>
+			<version>4.0.0</version>
 			<scope>provided</scope>
 		</dependency>
 	</dependencies>
